@@ -5,6 +5,7 @@ I was suitably impressed by the [Create camera exensions with Core Media IO](htt
 3. Add a feature the WWDC video does _not_ include: an animated background; use a loopable GIF for that, composing the separated foreground (the person) on top of it.
 
 This is what this code does, in a nutshell. As a challenge, I decided to develop the app using SwiftUI and Combine.
+
 ##The Project
 Obviously, to build the project you will need to replace the signing info: the team ID, etc., along with requesting the camera usage capability for the app. Be very, _very, very, very_ careful when modifying the extension-related stuff: the CMIO Mach Service name, Bundle ID, and so on: I had an _extremely_ hard time getting that part to work, none of the online recommendations working quite as expected; at the end, I was reduced to trial and error and blind luck, but it worked for me - eventually.😉😁
 ##The App
