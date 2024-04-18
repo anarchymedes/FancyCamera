@@ -129,7 +129,6 @@ struct ContentView: View {
                             }
                         }
                         .padding(.horizontal, 1.5)
-                        .disabled(model.hq)
 
                         Spacer()
                     }
@@ -143,7 +142,6 @@ struct ContentView: View {
                             }
                         }
                         .padding(.horizontal, 1.5)
-                        .disabled(model.hq)
 
                         Toggle("Pre-process Background", isOn: $model.preProcessBackground)
                             .padding(.horizontal, 1.5)
@@ -155,15 +153,11 @@ struct ContentView: View {
                             }
                         }
                         .padding(.horizontal, 1.5)
-                        .disabled(model.backgroundEffect != .animate || model.hq)
+                        .disabled(model.backgroundEffect != .animate)
 
-                        Toggle("HQ", isOn: $model.hq)
+                        Toggle("Half speed", isOn: $model.fps60)
                             .padding(.horizontal, 1.5)
-                            .disabled(model.backgroundEffect == .none)
-
-                        Toggle("60 FPS", isOn: $model.fps60)
-                            .padding(.horizontal, 1.5)
-                            .disabled(model.backgroundEffect == .none)
+                            .disabled(model.backgroundEffect != .animate)
                     }
                     .padding()
                 }

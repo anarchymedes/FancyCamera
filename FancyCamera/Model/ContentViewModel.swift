@@ -39,7 +39,6 @@ class ContentViewModel: ObservableObject {
     @Published var error: Error?
     @Published var backgroundEffect: BackgroundEffect {
         willSet {
-            timingHackPre()
             if newValue == .animate {
                 Task {
                     await updateBackgroundGIF(for: newValue)
@@ -54,23 +53,17 @@ class ContentViewModel: ObservableObject {
                     await updateBackgroundGIF(for: backgroundEffect)
                 }
             }
-            timingHackPost()
         }
     }
     @Published var backgroundAnimation: BackgroundAnimation {
-        willSet {
-            timingHackPre()
-        }
         didSet {
             // Reload the animation for the new GIF
             Task {
                 await updateBackgroundGIF(for: .animate)
             }
-            timingHackPost()
         }
     }
-    @Published var preProcessBackground: Bool = true
-    @Published var hq: Bool = false
+    @Published var preProcessBackground: Bool = false
     @Published var fps60: Bool = false
     
     @Published var cameraManager = CameraManager.shared
@@ -99,47 +92,6 @@ class ContentViewModel: ObservableObject {
         backgroundAnimation = .waterfall
         setupSubscriptions()
     }
-
-    // These two variables and the two methods below
-    // are parts of a hack that I had attempted to smooth out the
-    // switch between the background effects, animations, or cameras,
-    // while using the high-quality mask (the segmentationRequest.qualityLevel set to .balanced)
-    // When it's set to .fast, everything seems to work.
-    // There must be some kind of a race condition or a data race somewhere:
-    // but with all those CVBuffers being passed around, it's hard to pinpoint -
-    // and even the XCode Thread Sanitizer doesn't show anything useful.
-    // So, the camera, the effect, and the animation selections are disabled in the UI when the HQ box is ticked,
-    // which means, most of the code in question will not be invoked. Feci qoud potui...
-    @MainActor private var _tempHq = false
-    @MainActor private var _switching = false
-
-    func timingHackPre(delay wait: Bool = false) {
-        DispatchQueue.main.async {
-            self._switching = self.hq
-            self._tempHq = self.hq
-            self.hq = false
-        }
-        if (wait) {
-            Task(priority: .high){
-                try await Task.sleep(nanoseconds: 1_500_000_000)
-            }
-        }
-    }
-    
-    func timingHackPost(longer wait: Bool = false) {
-        Task(priority: .high) {
-            try await Task.sleep(nanoseconds: wait ? 1_500_000_000 : 500_000_000)
-            if await (self._tempHq != self.hq) {
-                DispatchQueue.main.async {
-                    self.hq = self._tempHq
-                }
-            }
-            DispatchQueue.main.async {
-                self._switching = false
-            }
-        }
-    }
-    //
 
     @MainActor
     public func resetLastFrame() {
@@ -274,13 +226,12 @@ class ContentViewModel: ObservableObject {
         }
     }
     
-    private func createMask(from frame: CGImage, hq: Bool) async -> CGImage? {
+    private func createMask(from frame: CGImage) async -> CGImage? {
         
-        let work = Task.detached(priority: hq ? .high : .medium) {()-> CGImage? in
+        let work = Task.detached(priority: .high) {()-> CGImage? in
             nonisolated(unsafe) let image = frame  // Make them all thread-local
             nonisolated(unsafe) let context = self.context
             
-            let q = hq
             let frame = image
             
             if Task.isCancelled {
@@ -288,8 +239,7 @@ class ContentViewModel: ObservableObject {
             }
             
             //Set up the VN request to generate the foreground mask
-            let segmentationRequest = VNGeneratePersonSegmentationRequest()
-            segmentationRequest.qualityLevel = q ? .balanced : .fast
+            let segmentationRequest = VNGenerateForegroundInstanceMaskRequest()
             // perform the request
             let handler = VNImageRequestHandler(cgImage: frame, options: [.ciContext: context])
             try? handler.perform([segmentationRequest])
@@ -298,10 +248,12 @@ class ContentViewModel: ObservableObject {
                 return nil
             }
             
-            guard let maskPixelBuffer =
-              segmentationRequest.results?.first?.pixelBuffer else { return nil }
-            // Convert the mask...
-            return CGImage.create(from: maskPixelBuffer)
+            guard let results = segmentationRequest.results?.first else {
+                return nil
+            }
+            
+            let masked = try? results.generateScaledMaskForImage(forInstances: results.allInstances, from: handler)
+            return masked != nil ? CGImage.create(from: masked) : nil
         }
         if Task.isCancelled {
             work.cancel()
@@ -352,14 +304,13 @@ class ContentViewModel: ObservableObject {
         }
     }
 
-    private func frameHandler(frame data: CVPixelBuffer?, effect: BackgroundEffect, backgroundPreProcess: Bool, animated: Bool, isGifReady: Bool, isHQ: Bool) async -> CGImage? {
+    private func frameHandler(frame data: CVPixelBuffer?, effect: BackgroundEffect, backgroundPreProcess: Bool, animated: Bool, isGifReady: Bool) async -> CGImage? {
         
         nonisolated(unsafe) let buffer = data // Extra insurance: make them all thread-local, just in case
         let animation = animated
         let preProcessBackground = backgroundPreProcess
         let theEffect = effect
         let gifReady = isGifReady
-        let hq = isHQ
         
         if theEffect == .none {
             if let frame = CGImage.create(from: buffer){
@@ -384,19 +335,14 @@ class ContentViewModel: ObservableObject {
             guard !Task.isCancelled else {return nil}
             
             // Get the mask
-            if let cgMask = await createMask(from: image, hq: hq) {
+            if let cgMask = await createMask(from: image) {
                 //...and use it
                 var maskImage = CIImage(cgImage: cgMask)
                 
                 // Checking for cancellation before every BIG step
                 guard !Task.isCancelled else {return nil}
 
-                let scaleX = originalSize.width / maskImage.extent.width
-                let scaleY = originalSize.height / maskImage.extent.height
-                // After resizing the mask, We want to blur its edges to reduse the pixellation,
-                // which in turn depends on the camera resolution and the segmentation quality
-                maskImage = maskImage.transformed(by: .init(scaleX: scaleX, y: scaleY), highQualityDownsample: true)
-                    .premultiplyingAlpha().applyingFilter("CIGaussianBlur", parameters: ["inputRadius": hi ? (hq ? 2.4 : 4) : (hq ? 3.2 : 4.8)])
+                maskImage = maskImage.applyingFilter("CIGaussianBlur", parameters: ["inputRadius": 2.4])
                 
                 var background = ciImage
                 
@@ -477,7 +423,7 @@ class ContentViewModel: ObservableObject {
                 
                 nonisolated(unsafe) let data = buffer
                 self.currentImageTask = Task {
-                    return await self.frameHandler(frame: data, effect: self.backgroundEffect, backgroundPreProcess: self.preProcessBackground, animated: self.animating, isGifReady: self.gifReady, isHQ: self.hq)
+                    return await self.frameHandler(frame: data, effect: self.backgroundEffect, backgroundPreProcess: self.preProcessBackground, animated: self.animating, isGifReady: self.gifReady)
                 }
                 
                 do {
